@@ -539,6 +539,7 @@ local function runSentry()
 end
 
 local sentryConnections = {}
+local watcherMode = nil
 
 local function installSentryWatcher()
     for _, connection in ipairs(sentryConnections) do
@@ -558,6 +559,8 @@ local function installSentryWatcher()
         end)
         sentryConnections[#sentryConnections + 1] = connection
     end
+
+    watcherMode = Config.sentryMode
 end
 
 --=====================================================================
@@ -1293,6 +1296,9 @@ task.spawn(function()
         if AB.Unloaded then break end
         if Config.sentryMode ~= "observe" then
             pcall(runSentry)
+            if watcherMode ~= Config.sentryMode then
+                pcall(installSentryWatcher)
+            end
         end
         if not hooksReady then
             if installNamecall() then
