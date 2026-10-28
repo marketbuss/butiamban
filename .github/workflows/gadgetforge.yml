@@ -56,16 +56,34 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/apktool" --version
 
-      - name: install objection + frida-tools + Il2CppDumper
+      - name: install objection + frida-tools
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install objection frida-tools
+          objection --help | head -3
+
+      - name: install Il2CppDumper (optional, for auto-dump)
+        continue-on-error: true
+        run: |
           mkdir -p "$HOME/il2cppdumper"
-          curl -sSL -o /tmp/il2.zip "https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6.0-v6.7.46.zip"
-          unzip -o /tmp/il2.zip -d "$HOME/il2cppdumper"
-          sudo apt-get update -qq
-          sudo apt-get install -y dotnet-runtime-6.0 || sudo apt-get install -y dotnet-runtime-8.0 || true
-          ls "$HOME/il2cppdumper"
+          set +e
+          # resolve latest Il2CppDumper release asset dynamically
+          ASSET_URL=$(curl -sS "https://api.github.com/repos/Perfare/Il2CppDumper/releases/latest" \
+            | python3 -c "import sys,json; r=json.load(sys.stdin);
+          for a in r.get('assets', []):
+              if 'net8' in a['name'] or 'net6' in a['name']:
+                  print(a['browser_download_url']); break")
+          echo "il2cppdumper asset: $ASSET_URL"
+          if [ -n "$ASSET_URL" ]; then
+            curl -sSL -o /tmp/il2.zip "$ASSET_URL" && unzip -o /tmp/il2.zip -d "$HOME/il2cppdumper" || true
+            ls "$HOME/il2cppdumper" || true
+          fi
+          # try installing dotnet so we can actually run it
+          sudo apt-get update -qq || true
+          sudo apt-get install -y dotnet-runtime-8.0 2>/dev/null \
+            || sudo apt-get install -y dotnet-runtime-6.0 2>/dev/null \
+            || echo "dotnet runtime unavailable — il2cpp dump will be skipped"
+          exit 0
 
       - name: fetch latest frida-gadget arm64
         id: gadget
@@ -137,9 +155,11 @@ jobs:
             "RequireAnyKey": false
           }
           JSON
-          # try dotnet, fallback to skipping (step has continue-on-error)
-          if command -v dotnet >/dev/null; then
+          # try dotnet + Il2CppDumper.dll, fallback to skipping
+          if command -v dotnet >/dev/null && [ -f "$HOME/il2cppdumper/Il2CppDumper.dll" ]; then
             dotnet "$HOME/il2cppdumper/Il2CppDumper.dll" libil2cpp.so global-metadata.dat . || true
+          else
+            echo "il2cpp dumper not available — skipping offset dump"
           fi
           ls -la || true
           if [ -f dump.cs ]; then
