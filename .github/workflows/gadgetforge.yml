@@ -1,0 +1,165 @@
+name: gadgetforge — frida-gadget apk patcher
+
+on:
+  push:
+    branches:
+      - claude/ollie-bench-deployment-u4k02l
+    paths:
+      - 'gadgetforge/input/**.apk'
+      - 'gadgetforge/scripts/**.js'
+      - '.github/workflows/gadgetforge.yml'
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: "URL from which to download the target apk (optional if you pushed to gadgetforge/input/)"
+        required: false
+        type: string
+      embed_script:
+        description: "Embed gadgetforge/scripts/mod.js inside the patched apk (vs. attach live from host)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up jdk 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: set up android sdk + build-tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;34.0.0 platform-tools'
+
+      - name: install apktool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apktool zipalign || true
+          apktool --version || true
+
+      - name: install objection + frida-tools
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install objection frida-tools
+
+      - name: fetch latest frida-gadget arm64
+        run: |
+          mkdir -p gadgetforge/work
+          V=$(curl -sS https://api.github.com/repos/frida/frida/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
+          echo "frida version: $V"
+          URL="https://github.com/frida/frida/releases/download/${V}/frida-gadget-${V}-android-arm64.so.xz"
+          curl -sSL -o gadgetforge/work/libfrida-gadget.so.xz "$URL"
+          xz -d gadgetforge/work/libfrida-gadget.so.xz
+          ls -la gadgetforge/work/
+
+      - name: pick target apk
+        run: |
+          mkdir -p gadgetforge/work
+          if [ -n "${{ github.event.inputs.apk_url }}" ]; then
+            curl -sSL -o gadgetforge/work/target.apk "${{ github.event.inputs.apk_url }}"
+          else
+            APK=$(ls gadgetforge/input/*.apk 2>/dev/null | head -1)
+            if [ -z "$APK" ]; then
+              echo "no input apk found; nothing to patch"
+              echo "push an apk to gadgetforge/input/ or use workflow_dispatch with apk_url"
+              exit 1
+            fi
+            cp "$APK" gadgetforge/work/target.apk
+          fi
+          ls -la gadgetforge/work/target.apk
+          sha256sum gadgetforge/work/target.apk
+
+      - name: generate debug keystore
+        run: |
+          cd gadgetforge/work
+          keytool -genkey -v -keystore debug.ks -storepass android -alias androiddebugkey \
+                  -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+                  -dname "CN=gadgetforge, OU=ollie, O=olivia, L=bench, S=hum, C=XX"
+
+      - name: patch apk with objection
+        run: |
+          cd gadgetforge/work
+          SCRIPT_ARG=""
+          if [ "${{ github.event.inputs.embed_script }}" = "true" ] && [ -f ../scripts/mod.js ]; then
+            SCRIPT_ARG="--script ../scripts/mod.js"
+          fi
+          objection patchapk \
+            --source target.apk \
+            --architecture arm64 \
+            --gadget-version "$(ls libfrida-gadget.so | sed 's/.*//')" \
+            --use-aapt2 \
+            --skip-resources \
+            $SCRIPT_ARG || true
+          ls -la target.objection.apk || ls -la *.apk
+
+      - name: fallback manual patch if objection failed
+        run: |
+          cd gadgetforge/work
+          if [ -f target.objection.apk ]; then
+            cp target.objection.apk target.gadget.unsigned.apk
+            exit 0
+          fi
+          echo "objection path failed — doing manual injection"
+          mkdir -p decoded
+          apktool d -f -o decoded target.apk
+          mkdir -p decoded/lib/arm64-v8a
+          cp libfrida-gadget.so decoded/lib/arm64-v8a/libfrida-gadget.so
+          # inject System.loadLibrary call into MainActivity's smali
+          MAIN=$(grep -lr "android.intent.action.MAIN" decoded/AndroidManifest.xml | head -1)
+          ACTIVITY=$(grep -oP 'activity[^>]*android:name="\K[^"]+' decoded/AndroidManifest.xml | head -1)
+          CLASS_PATH="decoded/smali/$(echo $ACTIVITY | tr '.' '/').smali"
+          if [ -f "$CLASS_PATH" ]; then
+            sed -i '0,/\.method.*constructor <init>()V/{
+              /\.locals/a\
+    const-string v0, "frida-gadget"\
+    invoke-static {v0}, Ljava\/lang\/System;->loadLibrary(Ljava\/lang\/String;)V
+            }' "$CLASS_PATH"
+          fi
+          apktool b decoded -o target.gadget.unsigned.apk
+
+      - name: zipalign + sign
+        run: |
+          cd gadgetforge/work
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          "$BT/zipalign" -v -p 4 target.gadget.unsigned.apk target.gadget.aligned.apk
+          "$BT/apksigner" sign \
+            --ks debug.ks --ks-pass pass:android --key-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            --out target.gadget.apk target.gadget.aligned.apk
+          "$BT/apksigner" verify --verbose target.gadget.apk
+          sha256sum target.gadget.apk
+
+      - name: upload patched apk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gadget-patched-apk
+          path: gadgetforge/work/target.gadget.apk
+          retention-days: 30
+
+      - name: push patched apk to apk-builds branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # fetch existing apk-builds so we don't nuke netcrawler artifact
+          git fetch origin apk-builds || true
+          git checkout -B apk-builds origin/apk-builds 2>/dev/null || git checkout --orphan apk-builds
+          git rm -rf . --quiet 2>/dev/null || true
+          mkdir -p build/gadgetforge
+          cp /home/runner/work/butiamban/butiamban/gadgetforge/work/target.gadget.apk build/gadgetforge/
+          sha256sum build/gadgetforge/target.gadget.apk > build/gadgetforge/target.gadget.apk.sha256
+          echo "patched from commit ${GITHUB_SHA}" > build/gadgetforge/BUILD_INFO.txt
+          echo "patched at $(date -u +%FT%TZ)" >> build/gadgetforge/BUILD_INFO.txt
+          git add build/
+          git commit -m "gadgetforge patched apk @ ${GITHUB_SHA::7}" || echo "nothing to commit"
+          git push --force origin apk-builds
