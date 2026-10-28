@@ -1,3 +1,10 @@
-patched from commit af728a07cedc9163056f1cfca997e5794b662be4
-patched at 2026-10-28T22:08:08Z
-frida version 17.24.3
+preset: friends-only
+frida: 17.24.3
+source sha256: df259a12fb616268a8d99315af3c9f2c5d2fd428bd82bb2d8feccbb76bf24169
+patched sha256: b9d3dd40825a547e5e6998655424ed43eed48160628a16fa08d1063ae56cbee8
+patched size: 14734095 bytes
+built from commit: e369cd3e3022177c8d1918e2f2e455d98d2fd10e
+built at: 2026-10-28T23:55:27Z
+il2cpp offsets found:
+{}
+objection path: failure
