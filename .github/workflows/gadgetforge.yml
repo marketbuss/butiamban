@@ -325,8 +325,9 @@ jobs:
           added = False
           for perm in needed:
               if perm not in s:
+                  tag = '<uses-permission android:name="' + perm + '"/>'
                   s = re.sub(r"(<manifest[^>]*>)",
-                      rf"\1\n    <uses-permission android:name=\"{perm}\"/>",
+                      lambda m, t=tag: m.group(1) + "\n    " + t,
                       s, count=1)
                   added = True
           if added:
