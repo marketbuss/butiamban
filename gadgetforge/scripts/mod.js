@@ -1,119 +1,187 @@
 /*
- * mod.js — gadget-side runtime hooks for the patched target apk
+ * gadgetforge mod.js v2 — generic Unity il2cpp mod runtime
  *
- * This file is loaded by frida-gadget *inside* the target process at
- * launch time when the apk is patched with workflow input
- * `embed_script=true`. It can also be used from the host:
- *   adb forward tcp:27042 tcp:27042
- *   frida -U -n gadget -l gadgetforge/scripts/mod.js
+ * The workflow prepends two globals before this file at build time:
+ *   const GADGETFORGE_PRESET  = "safe-public" | "friends-only" | "solo-godmode";
+ *   const GADGETFORGE_OFFSETS = { PlayerMovement_FixedUpdate: "0x...", ... };
  *
- * The example below shows the generic patterns used to mod a Unity
- * il2cpp game (Animal Company is one). Replace the Il2Cpp offsets
- * once you dump them with Il2CppDumper for your specific game version.
+ * Features
+ *   - 3 presets with sane toggles per lobby type
+ *   - hot-reload: writes config to /sdcard/Download/animalcompany.cfg on
+ *     first launch, re-reads it every 2 seconds — edit it on-device (any
+ *     file manager apk) and the mod picks up changes without reinstall
+ *   - verbose logs to logcat tag "gadget"
+ *   - safe no-op when an offset is zero or missing
  */
-
 'use strict';
 
-const log = (...a) => console.log('[gadget]', ...a);
+const TAG = '[gadget]';
+const CFG_PATH = '/sdcard/Download/animalcompany.cfg';
+
+const PRESETS = {
+    'safe-public': {
+        speed: 1.0, godMode: false, infiniteMoney: false,
+        esp: true, noFallDamage: true, noclip: false,
+        packetLog: false, speedCap: 1.3,
+    },
+    'friends-only': {
+        speed: 2.0, godMode: true, infiniteMoney: false,
+        esp: true, noFallDamage: true, noclip: false,
+        packetLog: true, speedCap: 5.0,
+    },
+    'solo-godmode': {
+        speed: 3.0, godMode: true, infiniteMoney: true,
+        esp: true, noFallDamage: true, noclip: true,
+        packetLog: true, speedCap: 10.0,
+    },
+};
+
+let CFG = Object.assign({}, PRESETS[typeof GADGETFORGE_PRESET !== 'undefined'
+    ? GADGETFORGE_PRESET : 'friends-only']);
+const OFFSETS = typeof GADGETFORGE_OFFSETS !== 'undefined' ? GADGETFORGE_OFFSETS : {};
+
+const log = (...a) => { console.log(TAG, ...a); };
 
 Java.perform(function () {
-    log('attached, pid=', Process.id, 'threads=', Process.enumerateThreads().length);
+    log('attach pid=', Process.id, 'preset=',
+        typeof GADGETFORGE_PRESET !== 'undefined' ? GADGETFORGE_PRESET : '?');
+    log('offsets:', JSON.stringify(OFFSETS));
+    log('initial cfg:', JSON.stringify(CFG));
 
-    // ---- 1. generic Java hooks (work on anything using the Java API) ----
+    // write out current config on first boot so olivia can edit it on-device
+    try {
+        const File = Java.use('java.io.File');
+        const FOS = Java.use('java.io.FileOutputStream');
+        const f = File.$new(CFG_PATH);
+        if (!f.exists()) {
+            const out = FOS.$new(f);
+            const bytes = Java.use('java.lang.String').$new(JSON.stringify(CFG, null, 2))
+                            .getBytes();
+            out.write(bytes);
+            out.close();
+            log('config seeded at', CFG_PATH);
+        }
+    } catch (e) { log('cfg seed err', e); }
 
-    // print every Application.onCreate so we know when the game is fully up
-    const App = Java.use('android.app.Application');
-    App.onCreate.implementation = function () {
-        log('Application.onCreate for', this.getPackageName());
-        this.onCreate();
-    };
+    // hot-reload: re-read cfg every 2s and apply changes
+    setInterval(function () {
+        Java.perform(function () {
+            try {
+                const File = Java.use('java.io.File');
+                const FIS = Java.use('java.io.FileInputStream');
+                const f = File.$new(CFG_PATH);
+                if (!f.exists()) return;
+                const sz = f.length();
+                if (sz <= 0 || sz > 8192) return;
+                const fis = FIS.$new(f);
+                const buf = Java.array('byte', new Array(sz).fill(0));
+                fis.read(buf);
+                fis.close();
+                const txt = Java.use('java.lang.String').$new(buf, 'UTF-8');
+                const next = JSON.parse(txt);
+                const old = JSON.stringify(CFG);
+                CFG = Object.assign({}, CFG, next);
+                if (JSON.stringify(CFG) !== old) log('cfg reload →', JSON.stringify(CFG));
+            } catch (e) { /* ignore malformed edits */ }
+        });
+    }, 2000);
 
-    // ---- 2. native-side il2cpp hooks (Unity games) ----
-    // find libil2cpp.so once it is mapped
-    const tryIl2Cpp = () => {
-        const m = Process.findModuleByName('libil2cpp.so');
-        if (!m) return null;
-        log('libil2cpp.so base=', m.base, 'size=', m.size);
-        return m;
-    };
-
-    // poll until libil2cpp.so is mapped (Unity loads it a bit after launch)
+    // il2cpp hooks: poll until libil2cpp.so is loaded
     let tries = 0;
-    const timer = setInterval(() => {
-        const il2 = tryIl2Cpp();
-        if (il2 || ++tries > 40) {
-            clearInterval(timer);
-            if (il2) wireHooks(il2);
-            else log('libil2cpp.so never mapped — not a Unity game?');
+    const il2wait = setInterval(() => {
+        const m = Process.findModuleByName('libil2cpp.so');
+        if (m) {
+            clearInterval(il2wait);
+            log('libil2cpp.so base=', m.base);
+            wireIl2Hooks(m);
+        } else if (++tries > 60) {
+            clearInterval(il2wait);
+            log('no libil2cpp — not Unity il2cpp');
         }
     }, 250);
-
-    function wireHooks(il2) {
-        // ------------------------------------------------------------
-        // REPLACE THESE OFFSETS with the ones you dumped with
-        // Il2CppDumper (dump.cs + script.json). Example symbols:
-        // ------------------------------------------------------------
-        const OFFSETS = {
-            PlayerMovement_FixedUpdate: 0x0,  // 0x012A3B40,
-            Economy_SetMoney:           0x0,  // 0x009B22A0,
-            Player_TakeDamage:          0x0,  // 0x011ACF10,
-            Camera_Render:              0x0,  // 0x00AA4580,
-            GameNet_SendPacket:         0x0,  // 0x01339C00,
-        };
-
-        // --- speed hack: scale velocity in FixedUpdate ---
-        if (OFFSETS.PlayerMovement_FixedUpdate) {
-            Interceptor.attach(il2.base.add(OFFSETS.PlayerMovement_FixedUpdate), {
-                onEnter(args) { this.self = args[0]; },
-                onLeave(_r) {
-                    // read the Vector3 velocity field at offset 0x40 (example)
-                    // then write it back scaled x2
-                    const vxPtr = this.self.add(0x40);
-                    const vx = vxPtr.readFloat();
-                    const vy = vxPtr.add(4).readFloat();
-                    const vz = vxPtr.add(8).readFloat();
-                    const k = 2.0;
-                    vxPtr.writeFloat(vx * k);
-                    vxPtr.add(4).writeFloat(vy);  // keep gravity sane
-                    vxPtr.add(8).writeFloat(vz * k);
-                }
-            });
-            log('speed hack x2 wired on PlayerMovement_FixedUpdate');
-        }
-
-        // --- infinite money / bananas: force the setter arg ---
-        if (OFFSETS.Economy_SetMoney) {
-            Interceptor.attach(il2.base.add(OFFSETS.Economy_SetMoney), {
-                onEnter(args) { args[1] = ptr(999999); }
-            });
-            log('money setter clamped to 999999');
-        }
-
-        // --- god mode: skip damage ---
-        if (OFFSETS.Player_TakeDamage) {
-            Interceptor.replace(il2.base.add(OFFSETS.Player_TakeDamage),
-                new NativeCallback(function () { return; }, 'void', ['pointer', 'float']));
-            log('damage path neutralised');
-        }
-
-        // --- ESP via Camera.Render: force depth test off on known mats ---
-        if (OFFSETS.Camera_Render) {
-            Interceptor.attach(il2.base.add(OFFSETS.Camera_Render), {
-                onEnter() { /* flip _ZTest=Always on cached materials here */ }
-            });
-            log('camera render hooked (populate ESP in onEnter)');
-        }
-
-        // --- packet logger ---
-        if (OFFSETS.GameNet_SendPacket) {
-            Interceptor.attach(il2.base.add(OFFSETS.GameNet_SendPacket), {
-                onEnter(args) {
-                    const len = args[2].toInt32();
-                    const bytes = args[1].readByteArray(Math.min(len, 128));
-                    log('tx', len, 'bytes', bytes);
-                }
-            });
-            log('packet tx logger wired');
-        }
-    }
 });
+
+function offsetPtr(base, key) {
+    const o = OFFSETS[key];
+    if (!o || o === '0x0' || o === '0x00' || o === '') return null;
+    return base.add(ptr(o));
+}
+
+function wireIl2Hooks(il2) {
+    const BASE = il2.base;
+
+    // speed hack — scales horizontal velocity
+    const pmFU = offsetPtr(BASE, 'PlayerMovement_FixedUpdate');
+    if (pmFU) {
+        Interceptor.attach(pmFU, {
+            onEnter(args) { this.self = args[0]; },
+            onLeave() {
+                if (!this.self || CFG.speed <= 1.001) return;
+                const k = Math.min(CFG.speed, CFG.speedCap || 10);
+                // velocity Vector3 commonly at offset 0x40 — adjust per game
+                try {
+                    const vp = this.self.add(0x40);
+                    vp.writeFloat(vp.readFloat() * k);
+                    vp.add(8).writeFloat(vp.add(8).readFloat() * k);
+                } catch (e) {}
+            }
+        });
+        log('speed hook wired');
+    }
+
+    // infinite money
+    const sm = offsetPtr(BASE, 'Economy_SetMoney');
+    if (sm) {
+        Interceptor.attach(sm, {
+            onEnter(args) {
+                if (CFG.infiniteMoney) args[1] = ptr(999999);
+            }
+        });
+        log('money hook wired');
+    }
+
+    // god mode: short-circuit damage
+    const dmg = offsetPtr(BASE, 'Player_TakeDamage');
+    if (dmg) {
+        Interceptor.attach(dmg, {
+            onEnter() { this.skip = CFG.godMode; },
+            onLeave(r) { if (this.skip) r.replace(ptr(0)); }
+        });
+        log('damage hook wired');
+    }
+
+    // ESP marker — attached to Camera.Render, actual depth-test flip
+    // happens in game-side material; this is the hook point
+    const cr = offsetPtr(BASE, 'Camera_Render');
+    if (cr) {
+        Interceptor.attach(cr, {
+            onEnter() { /* iterate renderers, set material._ZTest = Always */ }
+        });
+        log('camera render hook wired (plug ESP body here)');
+    }
+
+    // packet logger
+    const net = offsetPtr(BASE, 'GameNet_SendPacket');
+    if (net) {
+        Interceptor.attach(net, {
+            onEnter(args) {
+                if (!CFG.packetLog) return;
+                const len = args[2].toInt32();
+                if (len <= 0 || len > 256) return;
+                const bytes = args[1].readByteArray(Math.min(len, 128));
+                log('tx', len, 'B', bytes);
+            }
+        });
+        log('packet tx hook wired');
+    }
+
+    // stamina drain neutraliser
+    const st = offsetPtr(BASE, 'Stamina_Decrement');
+    if (st) {
+        Interceptor.replace(st,
+            new NativeCallback(function () { return; }, 'void', ['pointer', 'float']));
+        log('stamina drain neutralised');
+    }
+
+    log('all available hooks wired. edit', CFG_PATH, 'to retune live.');
+}

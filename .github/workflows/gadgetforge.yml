@@ -1,4 +1,4 @@
-name: gadgetforge — frida-gadget apk patcher
+name: gadgetforge — frida-gadget apk patcher v2
 
 on:
   push:
@@ -7,18 +7,20 @@ on:
     paths:
       - 'gadgetforge/input/**.apk'
       - 'gadgetforge/scripts/**.js'
+      - 'gadgetforge/presets/**'
       - '.github/workflows/gadgetforge.yml'
   workflow_dispatch:
     inputs:
       apk_url:
-        description: "URL from which to download the target apk (ignored if gadgetforge/input/ holds one)"
+        description: "URL to download target apk from (ignored if gadgetforge/input/ holds one)"
         required: false
         type: string
-      embed_script:
-        description: "Embed gadgetforge/scripts/mod.js inside the patched apk (so no host-side frida attach is needed)"
+      preset:
+        description: "mod preset baked into mod.js: safe-public | friends-only | solo-godmode"
         required: false
-        default: false
-        type: boolean
+        default: "friends-only"
+        type: choice
+        options: [safe-public, friends-only, solo-godmode]
 
 permissions:
   contents: write
@@ -54,11 +56,16 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/apktool" --version
 
-      - name: install objection + frida-tools
+      - name: install objection + frida-tools + Il2CppDumper
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install objection frida-tools
-          objection --help | head -3
+          mkdir -p "$HOME/il2cppdumper"
+          curl -sSL -o /tmp/il2.zip "https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6.0-v6.7.46.zip"
+          unzip -o /tmp/il2.zip -d "$HOME/il2cppdumper"
+          sudo apt-get update -qq
+          sudo apt-get install -y dotnet-runtime-6.0 || sudo apt-get install -y dotnet-runtime-8.0 || true
+          ls "$HOME/il2cppdumper"
 
       - name: fetch latest frida-gadget arm64
         id: gadget
@@ -78,6 +85,7 @@ jobs:
         run: |
           mkdir -p gadgetforge/work
           APK=""
+          BASENAME="target"
           if [ -n "${{ github.event.inputs.apk_url }}" ]; then
             curl -sSL -o gadgetforge/work/target.apk "${{ github.event.inputs.apk_url }}"
             APK="gadgetforge/work/target.apk"
@@ -89,10 +97,75 @@ jobs:
             fi
             cp "$FOUND" gadgetforge/work/target.apk
             APK="gadgetforge/work/target.apk"
-            echo "basename=$(basename "$FOUND" .apk)" >> "$GITHUB_OUTPUT"
+            BASENAME="$(basename "$FOUND" .apk)"
           fi
+          echo "basename=$BASENAME" >> "$GITHUB_OUTPUT"
+          echo "sha_in=$(sha256sum "$APK" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           ls -la "$APK"
-          sha256sum "$APK"
+
+      - name: auto il2cpp dump (if Unity apk)
+        id: il2
+        continue-on-error: true
+        run: |
+          cd gadgetforge/work
+          mkdir -p il2
+          unzip -q target.apk -d il2unzip
+          IL2SO=$(find il2unzip -name "libil2cpp.so" | head -1)
+          META=$(find il2unzip -name "global-metadata.dat" | head -1)
+          if [ -z "$IL2SO" ] || [ -z "$META" ]; then
+            echo "not a Unity il2cpp apk — skipping dump"
+            echo "offsets={}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "il2cpp detected: $IL2SO + $META"
+          cp "$IL2SO" il2/libil2cpp.so
+          cp "$META" il2/global-metadata.dat
+          cd il2
+          cat > config.json <<'JSON'
+          {
+            "ForceDump": false,
+            "NoRedirectedPointer": false,
+            "DumpMethod": true,
+            "DumpField": true,
+            "DumpProperty": false,
+            "DumpAttribute": false,
+            "DumpFieldOffset": true,
+            "DumpMethodOffset": true,
+            "DumpTypeDefIndex": false,
+            "GenerateDummyDll": false,
+            "GenerateScript": false,
+            "RequireAnyKey": false
+          }
+          JSON
+          # try dotnet, fallback to skipping (step has continue-on-error)
+          if command -v dotnet >/dev/null; then
+            dotnet "$HOME/il2cppdumper/Il2CppDumper.dll" libil2cpp.so global-metadata.dat . || true
+          fi
+          ls -la || true
+          if [ -f dump.cs ]; then
+            python3 - <<'PY' > ../il2_offsets.json
+          import re, json, pathlib
+          dump = pathlib.Path("dump.cs").read_text(errors="ignore")
+          # look for well-known game-mod symbols
+          wanted = {
+            "PlayerMovement_FixedUpdate": r"PlayerMovement\.FixedUpdate.*?RVA:\s*0x([0-9A-Fa-f]+)",
+            "PlayerMovement_Update":      r"PlayerMovement\.Update\b.*?RVA:\s*0x([0-9A-Fa-f]+)",
+            "Economy_SetMoney":           r"Economy\.(?:SetMoney|AddMoney|Set).*?RVA:\s*0x([0-9A-Fa-f]+)",
+            "Player_TakeDamage":          r"(?:Player|PlayerHealth)\.(?:TakeDamage|OnDamage|Damage).*?RVA:\s*0x([0-9A-Fa-f]+)",
+            "Camera_Render":              r"Camera\.Render\b.*?RVA:\s*0x([0-9A-Fa-f]+)",
+            "GameNet_SendPacket":         r"(?:NetworkManager|GameNet|Rpc)\.(?:Send|SendPacket|RpcSend).*?RVA:\s*0x([0-9A-Fa-f]+)",
+            "Stamina_Decrement":          r"Stamina\.(?:Decrement|Consume|Drain).*?RVA:\s*0x([0-9A-Fa-f]+)",
+          }
+          out = {}
+          for name, pat in wanted.items():
+            m = re.search(pat, dump, re.DOTALL)
+            if m: out[name] = "0x" + m.group(1).upper()
+          print(json.dumps(out))
+          PY
+            echo "offsets=$(cat ../il2_offsets.json)" >> "$GITHUB_OUTPUT"
+            echo "il2cpp offsets:"
+            cat ../il2_offsets.json
+          fi
 
       - name: generate debug keystore
         run: |
@@ -102,26 +175,42 @@ jobs:
                   -dname "CN=gadgetforge, OU=ollie, O=olivia, L=bench, S=hum, C=XX" \
                   -noprompt
 
+      - name: prepare mod.js (preset + offsets injected)
+        run: |
+          cd gadgetforge/work
+          cp ../scripts/mod.js mod.base.js
+          PRESET='${{ github.event.inputs.preset || 'friends-only' }}'
+          OFFSETS='${{ steps.il2.outputs.offsets || '{}' }}'
+          echo "preset: $PRESET"
+          echo "offsets: $OFFSETS"
+          python3 - <<PY > mod.js
+          preset = "$PRESET"
+          import json
+          offs = json.loads(r'''$OFFSETS''' or "{}")
+          head = f"""// gadgetforge mod.js — generated {preset} preset
+          const GADGETFORGE_PRESET = "{preset}";
+          const GADGETFORGE_OFFSETS = {json.dumps(offs, indent=2)};
+          """
+          print(head)
+          print(open("mod.base.js").read())
+          PY
+          head -5 mod.js
+          wc -l mod.js
+
       - name: patch apk with objection
         id: objpatch
         continue-on-error: true
         run: |
           cd gadgetforge/work
-          SCRIPT_ARG=""
-          if [ "${{ github.event.inputs.embed_script }}" = "true" ] && [ -f ../scripts/mod.js ]; then
-            cp ../scripts/mod.js ./mod.js
-            SCRIPT_ARG="--script mod.js"
-          fi
-          # objection generates target.objection.apk next to source
           objection patchapk \
             --source target.apk \
             --architecture arm64 \
             --gadget-source libfrida-gadget.so \
             --skip-resources \
-            $SCRIPT_ARG
+            --script mod.js
           ls -la target.objection.apk && mv target.objection.apk patched.unsigned.apk
 
-      - name: manual fallback patch (if objection failed)
+      - name: manual fallback patch
         if: steps.objpatch.outcome == 'failure'
         run: |
           cd gadgetforge/work
@@ -129,16 +218,38 @@ jobs:
           rm -rf decoded
           apktool d -f -o decoded target.apk
 
-          # add the gadget .so
+          # drop the gadget .so into arm64 (plus armeabi-v7a if present)
           mkdir -p decoded/lib/arm64-v8a
           cp libfrida-gadget.so decoded/lib/arm64-v8a/libfrida-gadget.so
 
-          # find launcher activity declared in AndroidManifest.xml
+          # ship mod.js + config next to the gadget .so so gadget auto-loads it
+          # (android only extracts lib*.so from apks — hence the .so suffix hack)
+          cp mod.js decoded/lib/arm64-v8a/libfrida-gadget.script.so
+          cat > decoded/lib/arm64-v8a/libfrida-gadget.config.so <<'EOF'
+          {
+            "interaction": {
+              "type": "script",
+              "path": "./libfrida-gadget.script.so",
+              "on_change": "reload"
+            }
+          }
+          EOF
+
           LAUNCH=$(python3 - <<'PY'
-          import re, xml.etree.ElementTree as ET
+          import xml.etree.ElementTree as ET
           ns = "{http://schemas.android.com/apk/res/android}"
           t = ET.parse("decoded/AndroidManifest.xml").getroot()
           pkg = t.get("package", "")
+          # prefer Application subclass if there is one
+          for app in t.findall("application"):
+              appname = app.get(ns+"name")
+              if appname:
+                  if appname.startswith("."): appname = pkg + appname
+                  elif "." not in appname: appname = pkg + "." + appname
+                  if appname and appname != "android.app.Application":
+                      print(appname)
+                      raise SystemExit
+          # else: launcher activity
           for app in t.findall("application"):
               for act in app.findall("activity"):
                   for intf in act.findall("intent-filter"):
@@ -152,13 +263,10 @@ jobs:
                           raise SystemExit
           PY
           )
-          echo "launcher: $LAUNCH"
-          SMALI_PATH="decoded/smali/$(echo $LAUNCH | tr '.' '/').smali"
-          # fall back to looking in smali_classes2/3 if not in smali/
-          if [ ! -f "$SMALI_PATH" ]; then
-            SMALI_PATH=$(find decoded -path "*/$(echo $LAUNCH | tr '.' '/').smali" | head -1)
-          fi
-          echo "smali: $SMALI_PATH"
+          echo "injection target: $LAUNCH"
+          SMALI_PATH=$(find decoded -path "*/$(echo $LAUNCH | tr '.' '/').smali" | head -1)
+          echo "smali path: $SMALI_PATH"
+          [ -z "$SMALI_PATH" ] && { echo "could not find smali for $LAUNCH"; exit 1; }
 
           python3 - "$SMALI_PATH" <<'PY'
           import sys, re, pathlib
@@ -168,13 +276,11 @@ jobs:
               "    const-string v0, \"frida-gadget\"\n"
               "    invoke-static {v0}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V\n"
           )
-          # inject at the top of <clinit> if exists, else add one
           m = re.search(r"\.method static constructor <clinit>\(\)V\n(?:\s*\.locals \d+\n)?", src)
           if m:
               i = m.end()
               out = src[:i] + injection + src[i:]
           else:
-              # append a new clinit before end of class
               clinit = (
                   "\n.method static constructor <clinit>()V\n"
                   "    .locals 1\n"
@@ -187,19 +293,25 @@ jobs:
           print("patched clinit")
           PY
 
-          # make sure INTERNET permission is present
+          # make sure INTERNET + storage perms are present
           python3 - <<'PY'
           import re, pathlib
           p = pathlib.Path("decoded/AndroidManifest.xml")
           s = p.read_text()
-          if "android.permission.INTERNET" not in s:
-              s = s.replace("<manifest ",
-                  "<manifest ", 1)
-              s = re.sub(r"(<manifest[^>]*>)",
-                  r"\1\n    <uses-permission android:name=\"android.permission.INTERNET\"/>",
-                  s, count=1)
+          needed = [
+            "android.permission.INTERNET",
+            "android.permission.READ_EXTERNAL_STORAGE",
+          ]
+          added = False
+          for perm in needed:
+              if perm not in s:
+                  s = re.sub(r"(<manifest[^>]*>)",
+                      rf"\1\n    <uses-permission android:name=\"{perm}\"/>",
+                      s, count=1)
+                  added = True
+          if added:
               p.write_text(s)
-              print("added INTERNET permission")
+              print("added perms")
           PY
 
           apktool b decoded -o patched.unsigned.apk
@@ -213,23 +325,44 @@ jobs:
           "$BT/apksigner" sign \
             --ks debug.ks --ks-pass pass:android --key-pass pass:android \
             --ks-key-alias androiddebugkey \
+            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
             --out target.gadget.apk patched.aligned.apk
           "$BT/apksigner" verify --verbose target.gadget.apk
           sha256sum target.gadget.apk
-          ls -la target.gadget.apk
+
+      - name: build info
+        id: info
+        run: |
+          cd gadgetforge/work
+          {
+            echo "preset: ${{ github.event.inputs.preset || 'friends-only' }}"
+            echo "frida: ${{ steps.gadget.outputs.version }}"
+            echo "source sha256: ${{ steps.pick.outputs.sha_in }}"
+            echo "patched sha256: $(sha256sum target.gadget.apk | awk '{print $1}')"
+            echo "patched size: $(stat -c %s target.gadget.apk) bytes"
+            echo "built from commit: ${GITHUB_SHA}"
+            echo "built at: $(date -u +%FT%TZ)"
+            echo "il2cpp offsets found:"
+            echo '${{ steps.il2.outputs.offsets }}' | python3 -m json.tool || echo "n/a"
+            echo "objection path: ${{ steps.objpatch.outcome }}"
+          } > BUILD_INFO.txt
+          cat BUILD_INFO.txt
 
       - name: upload patched apk artifact
         uses: actions/upload-artifact@v4
         with:
           name: gadget-patched-apk
-          path: gadgetforge/work/target.gadget.apk
+          path: |
+            gadgetforge/work/target.gadget.apk
+            gadgetforge/work/BUILD_INFO.txt
+            gadgetforge/work/mod.js
           retention-days: 30
 
       - name: push patched apk to apk-builds branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BASENAME="${{ steps.pick.outputs.basename || 'target' }}"
+          BASENAME="${{ steps.pick.outputs.basename }}"
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin apk-builds || true
@@ -240,13 +373,10 @@ jobs:
             git rm -rf . --quiet 2>/dev/null || true
           fi
           mkdir -p build/gadgetforge
-          cp /home/runner/work/butiamban/butiamban/gadgetforge/work/target.gadget.apk "build/gadgetforge/${BASENAME}.gadget.apk"
+          cp /home/runner/work/butiamban/butiamban/gadgetforge/work/target.gadget.apk  "build/gadgetforge/${BASENAME}.gadget.apk"
+          cp /home/runner/work/butiamban/butiamban/gadgetforge/work/BUILD_INFO.txt     "build/gadgetforge/${BASENAME}.BUILD_INFO.txt"
+          cp /home/runner/work/butiamban/butiamban/gadgetforge/work/mod.js             "build/gadgetforge/${BASENAME}.mod.js"
           sha256sum "build/gadgetforge/${BASENAME}.gadget.apk" > "build/gadgetforge/${BASENAME}.gadget.apk.sha256"
-          {
-            echo "patched from commit ${GITHUB_SHA}"
-            echo "patched at $(date -u +%FT%TZ)"
-            echo "frida version ${{ steps.gadget.outputs.version }}"
-          } > "build/gadgetforge/${BASENAME}.BUILD_INFO.txt"
           git add build/
-          git commit -m "gadgetforge: ${BASENAME} patched @ ${GITHUB_SHA::7}" || echo "nothing to commit"
+          git commit -m "gadgetforge: ${BASENAME} patched @ ${GITHUB_SHA::7} (${{ github.event.inputs.preset || 'friends-only' }})" || echo "nothing to commit"
           git push --force origin apk-builds
