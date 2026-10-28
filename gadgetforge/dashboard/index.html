@@ -157,12 +157,23 @@ document.getElementById('copy').addEventListener('click', () => {
   const b = document.getElementById('copy'); b.textContent='copié ✓';
   setTimeout(() => b.textContent='copier dans le presse-papier', 1200);
 });
-document.getElementById('download').addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify(cfg, null, 2)], {type:'application/json'});
-  const u = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = u; a.download = 'animalcompany.cfg'; a.click();
-  setTimeout(() => URL.revokeObjectURL(u), 2000);
+document.getElementById('download').addEventListener('click', async () => {
+  const payload = JSON.stringify(cfg, null, 2);
+  const b = document.getElementById('download');
+  // artifact runtime: window.claude.downloads if present, else fallback to clipboard
+  try {
+    if (window.claude && window.claude.downloads && typeof window.claude.downloads.save === 'function') {
+      await window.claude.downloads.save('animalcompany.cfg', new Blob([payload], {type:'application/json'}));
+      b.textContent = 'téléchargé ✓';
+    } else {
+      await navigator.clipboard.writeText(payload);
+      b.textContent = 'copié (clipboard) ✓';
+    }
+  } catch (e) {
+    await navigator.clipboard.writeText(payload);
+    b.textContent = 'copié (clipboard) ✓';
+  }
+  setTimeout(() => b.textContent='télécharger .cfg', 1400);
 });
 document.getElementById('qr').addEventListener('click', async () => {
   const box = document.getElementById('qrbox');
