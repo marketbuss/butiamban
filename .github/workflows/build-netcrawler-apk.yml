@@ -1,0 +1,48 @@
+name: build netcrawler apk
+
+on:
+  push:
+    branches:
+      - claude/ollie-bench-deployment-u4k02l
+    paths:
+      - 'netcrawler/**'
+      - '.github/workflows/build-netcrawler-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up jdk 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: set up android sdk
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0'
+
+      - name: gradle wrapper
+        working-directory: netcrawler
+        run: gradle wrapper --gradle-version 8.5 --distribution-type bin
+
+      - name: build debug apk
+        working-directory: netcrawler
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: rename apk
+        run: |
+          cp netcrawler/app/build/outputs/apk/debug/app-debug.apk netcrawler-debug.apk
+          ls -la netcrawler-debug.apk
+          sha256sum netcrawler-debug.apk
+
+      - name: upload apk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: netcrawler-apk
+          path: netcrawler-debug.apk
+          retention-days: 30

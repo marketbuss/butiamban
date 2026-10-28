@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="20dp"
+    android:background="#0A0E12">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="netcrawler — quest 3 lan recon"
+        android:textColor="#7DF9FF"
+        android:textSize="22sp"
+        android:textStyle="bold"/>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="arp · tcp sweep · banner · mdns · ssdp · upnp · coap · netbios · snmp · smb · mqtt · http · wifi"
+        android:textColor="#9BB"
+        android:textSize="11sp"
+        android:paddingBottom="10dp"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingBottom="8dp">
+
+        <EditText
+            android:id="@+id/cidr"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:hint="cidr (blank = auto)"
+            android:textColor="#EEE"
+            android:textColorHint="#777"
+            android:background="#141A20"
+            android:padding="10dp"
+            android:inputType="text"/>
+
+        <EditText
+            android:id="@+id/ports"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:hint="ports (comma)"
+            android:textColor="#EEE"
+            android:textColorHint="#777"
+            android:background="#141A20"
+            android:padding="10dp"
+            android:inputType="text"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingBottom="4dp">
+        <CheckBox android:id="@+id/cbBanner"  android:text="banner"  android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <CheckBox android:id="@+id/cbHttp"    android:text="http"    android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <CheckBox android:id="@+id/cbMdns"    android:text="mdns"    android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <CheckBox android:id="@+id/cbSsdp"    android:text="ssdp"    android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <CheckBox android:id="@+id/cbUpnp"    android:text="upnp"    android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <CheckBox android:id="@+id/cbCoap"    android:text="coap"    android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingBottom="8dp">
+        <CheckBox android:id="@+id/cbNetbios" android:text="netbios" android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <CheckBox android:id="@+id/cbSnmp"    android:text="snmp"    android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <CheckBox android:id="@+id/cbSmb"     android:text="smb"     android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <CheckBox android:id="@+id/cbMqtt"    android:text="mqtt"    android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <CheckBox android:id="@+id/cbWifi"    android:text="wifi"    android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <CheckBox android:id="@+id/cbReport"  android:text="json"    android:checked="true"  android:textColor="#CFC" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <Button android:id="@+id/btnScan"  android:text="scan" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <Button android:id="@+id/btnStop"  android:text="stop" android:layout_marginStart="8dp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+        <Button android:id="@+id/btnClear" android:text="clear" android:layout_marginStart="8dp" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="16dp"
+            android:gravity="center_vertical"
+            android:textColor="#CFC"
+            android:text="idle"/>
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginTop="10dp"
+        android:background="#0D1116">
+
+        <TextView
+            android:id="@+id/log"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="10dp"
+            android:fontFamily="monospace"
+            android:textColor="#D7F2E4"
+            android:textSize="12sp"
+            android:text=""/>
+    </ScrollView>
+</LinearLayout>
